@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="referrer" content="no-referrer">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-7w0Q3UR33gVvzIl5xZtZBwgnyGEr3AyKoMShmkOoVJA='; style-src 'unsafe-inline'; connect-src 'self'; media-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-oLIxyf61w26A/8P4jlH2C4oSLKMbxrbuYNyN5+1Diyw='; style-src 'unsafe-inline'; connect-src 'self'; media-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
     <title>Video</title>
 
     <style>
@@ -72,8 +72,37 @@
             (item.path !== undefined && item.path !== "media/" + hash + ".mp4") || item.content_type !== "video/mp4" ||
             !Number.isSafeInteger(item.size_bytes) || item.size_bytes <= 0 ||
             !Number.isFinite(item.duration_seconds) || item.duration_seconds <= 0) throw new Error("Media unavailable");
-        player.addEventListener("error", unavailable, {once: true});
-        player.src = new URL("./media/" + hash + ".mp4", location.href).href;
+        const mediaUrl = new URL("./media/" + hash + ".mp4", location.href);
+        let redirected = false, fallbackTimer = null;
+        const clearFallbackTimer = () => {
+            if (fallbackTimer !== null) {clearTimeout(fallbackTimer); fallbackTimer = null;}
+        };
+        const openDirectly = async () => {
+            if (redirected) return;
+            redirected = true;
+            clearFallbackTimer();
+            const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8000);
+            try {
+                const result = await fetch(mediaUrl, {
+                    method: "HEAD", redirect: "error", credentials: "omit", referrerPolicy: "no-referrer",
+                    cache: "no-store", signal: controller.signal
+                });
+                if (result.status !== 200 || result.redirected || result.url !== mediaUrl.href ||
+                    result.headers.get("content-type")?.split(";")[0].trim() !== "video/mp4")
+                    throw new Error("Direct media unavailable");
+                window.location.replace(mediaUrl.href);
+            } catch (_error) {unavailable();}
+            finally {clearTimeout(timer);}
+        };
+        const source = document.createElement("source");
+        source.src = mediaUrl.href;
+        source.type = "video/mp4";
+        source.addEventListener("error", openDirectly, {once: true});
+        player.addEventListener("error", openDirectly, {once: true});
+        player.addEventListener("canplay", clearFallbackTimer, {once: true});
+        player.addEventListener("playing", clearFallbackTimer, {once: true});
+        player.appendChild(source);
+        fallbackTimer = setTimeout(openDirectly, 10000);
         player.load();
         player.play().catch(() => {
             // Browser autoplay policy leaves the same native controls available.
