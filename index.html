@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="en" data-native-video-viewer="1">
+<html lang="en" data-tiktok-embed-viewer="1">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="referrer" content="no-referrer">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-oLIxyf61w26A/8P4jlH2C4oSLKMbxrbuYNyN5+1Diyw='; style-src 'unsafe-inline'; connect-src 'self'; media-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-prx+Bt2DIqusO4GBSQvVS8r8QJX7ptIvk1K/hX4aSDA='; style-src 'unsafe-inline'; connect-src 'self'; media-src 'self'; frame-src https://www.tiktok.com; object-src 'none'; base-uri 'none'; form-action 'none'">
     <title>Video</title>
 
     <style>
@@ -17,65 +17,113 @@
             overflow: hidden;
         }
 
-        video {
+        video,
+        iframe {
             display: block;
             width: 100%;
             height: 100%;
             object-fit: contain;
             background: #000;
         }
+        iframe { border: 0; }
+        #playerError {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            margin: 0;
+            padding: 12px;
+            background: #000;
+            color: #fff;
+            font: 14px system-ui, sans-serif;
+            text-align: center;
+        }
+        #playerError[hidden] { display: none; }
     </style>
 </head>
 
 <body>
 <video id="player" controls autoplay playsinline preload="auto"></video>
+<p id="playerError" role="status" hidden></p>
 
 <script>
 "use strict";
 
 (async () => {
     const player = document.getElementById("player");
-    const unavailable = () => document.body.replaceChildren();
+    const error = document.getElementById("playerError");
+    const unavailable = () => { player.remove(); error.textContent = "Video unavailable."; error.hidden = false; };
     try {
+        if (location.protocol !== "https:") throw new Error("HTTPS required");
         const query = new URLSearchParams(location.search);
-        if (location.protocol !== "https:" || [...query.keys()].length !== 2 ||
-            query.getAll("id").length !== 1 || query.getAll("h").length !== 1 ||
-            !/^[0-9]{1,20}$/.test(query.get("id") || "") ||
-            !/^[a-f0-9]{64}$/.test(query.get("h") || "")) throw new Error("Invalid identity");
-        const id = query.get("id"), hash = query.get("h");
+        const id = query.get("id");
+        if (query.getAll("id").length !== 1) throw new Error("Exact video identity required");
+        if (query.size === 1 && /^[1-9][0-9]{9,19}$/.test(id || "")) {
+            const frame = document.createElement("iframe");
+            frame.id = "player";
+            frame.title = "Video player";
+            frame.allow = "fullscreen; picture-in-picture; encrypted-media";
+            frame.allowFullscreen = true;
+            frame.referrerPolicy = "strict-origin-when-cross-origin";
+            frame.src = "https://www.tiktok.com/player/v1/" + id +
+                "?controls=1&description=0&music_info=0&rel=0&autoplay=0";
+            window.addEventListener("message", event => {
+                if (event.origin !== "https://www.tiktok.com" || event.source !== frame.contentWindow ||
+                    !event.data || event.data["x-tiktok-player"] !== true) return;
+                if (event.data.type === "onPlayerError") {
+                    const code = event.data.value?.errorCode;
+                    if (Number.isInteger(code) && code >= 1000 && code < 4000) {
+                        error.textContent = code === 3002 ? "Tap play to start the video." : "Video unavailable (" + code + ").";
+                        error.hidden = false;
+                    }
+                } else if (event.data.type === "onStateChange" && event.data.value === 1) {
+                    error.textContent = "";
+                    error.hidden = true;
+                }
+            });
+            // The official player owns playback, its branding and its errors.
+            // No timer or provider error can redirect the surrounding page.
+            player.replaceWith(frame);
+            return;
+        }
+
+        // Historical owned-file links retain their exact fixed-media binding.
+        const hash = query.get("h");
+        if (query.size !== 2 || query.getAll("h").length !== 1 || !/^[0-9]{1,20}$/.test(id || "") ||
+            !/^[a-f0-9]{64}$/.test(hash || "")) throw new Error("Invalid owned identity");
         const abort = new AbortController(), timeout = setTimeout(() => abort.abort(), 8000);
         let manifest;
         try {
-            const result = await fetch(new URL("./media-index.json", location.href), {
+            const response = await fetch(new URL("./media-index.json", location.href), {
                 redirect: "error", credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store", signal: abort.signal
             });
-            if (!result.ok || result.headers.get("content-type")?.split(";")[0].trim() !== "application/json")
-                throw new Error("Manifest unavailable");
-            const reader = result.body.getReader(), decoder = new TextDecoder("utf-8", {fatal: true});
+            if (!response.ok || response.headers.get("content-type")?.split(";")[0].trim() !== "application/json")
+                throw new Error("Owned manifest unavailable");
+            const reader = response.body.getReader(), decoder = new TextDecoder("utf-8", {fatal: true});
             let size = 0, text = "";
             try {
                 for (;;) {
                     const chunk = await reader.read();
                     if (chunk.done) break;
                     size += chunk.value.byteLength;
-                    if (size > 1024 * 1024) {abort.abort(); throw new Error("Manifest too large");}
+                    if (size > 1024 * 1024) { abort.abort(); throw new Error("Owned manifest exceeds bound"); }
                     text += decoder.decode(chunk.value, {stream: true});
                 }
                 text += decoder.decode();
-            } finally {reader.releaseLock();}
+            } finally { reader.releaseLock(); }
             manifest = JSON.parse(text);
-        } finally {clearTimeout(timeout);}
+        } finally { clearTimeout(timeout); }
         if (!manifest || manifest.version !== 1 || !manifest.items || Array.isArray(manifest.items) ||
-            !Object.hasOwn(manifest.items, id)) throw new Error("Unknown identity");
+            !Object.hasOwn(manifest.items, id)) throw new Error("Unknown owned identity");
         const item = manifest.items[id];
         if (!item || item.status !== "READY" || item.sha256 !== hash ||
             (item.path !== undefined && item.path !== "media/" + hash + ".mp4") || item.content_type !== "video/mp4" ||
             !Number.isSafeInteger(item.size_bytes) || item.size_bytes <= 0 ||
-            !Number.isFinite(item.duration_seconds) || item.duration_seconds <= 0) throw new Error("Media unavailable");
+            !Number.isFinite(item.duration_seconds) || item.duration_seconds <= 0) throw new Error("Owned media unavailable");
         const mediaUrl = new URL("./media/" + hash + ".mp4", location.href);
         let redirected = false, fallbackTimer = null;
         const clearFallbackTimer = () => {
-            if (fallbackTimer !== null) {clearTimeout(fallbackTimer); fallbackTimer = null;}
+            if (fallbackTimer !== null) { clearTimeout(fallbackTimer); fallbackTimer = null; }
         };
         const openDirectly = async () => {
             if (redirected) return;
@@ -83,16 +131,14 @@
             clearFallbackTimer();
             const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8000);
             try {
-                const result = await fetch(mediaUrl, {
-                    method: "HEAD", redirect: "error", credentials: "omit", referrerPolicy: "no-referrer",
-                    cache: "no-store", signal: controller.signal
-                });
-                if (result.status !== 200 || result.redirected || result.url !== mediaUrl.href ||
-                    result.headers.get("content-type")?.split(";")[0].trim() !== "video/mp4")
-                    throw new Error("Direct media unavailable");
+                const response = await fetch(mediaUrl, {method: "HEAD", redirect: "error", credentials: "omit",
+                    referrerPolicy: "no-referrer", cache: "no-store", signal: controller.signal});
+                if (response.status !== 200 || response.redirected || response.url !== mediaUrl.href ||
+                    response.headers.get("content-type")?.split(";")[0].trim() !== "video/mp4")
+                    throw new Error("Owned direct media unavailable");
                 window.location.replace(mediaUrl.href);
-            } catch (_error) {unavailable();}
-            finally {clearTimeout(timer);}
+            } catch (_error) { unavailable(); }
+            finally { clearTimeout(timer); }
         };
         const source = document.createElement("source");
         source.src = mediaUrl.href;
@@ -104,10 +150,8 @@
         player.appendChild(source);
         fallbackTimer = setTimeout(openDirectly, 10000);
         player.load();
-        player.play().catch(() => {
-            // Browser autoplay policy leaves the same native controls available.
-        });
-    } catch (_error) {unavailable();}
+        player.play().catch(() => { /* Historical native controls remain available. */ });
+    } catch (_error) { unavailable(); }
 })();
 </script>
 </body>
